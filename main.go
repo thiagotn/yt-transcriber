@@ -1,31 +1,29 @@
 package main
 
 import (
-	"context"
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
-	aai "github.com/AssemblyAI/assemblyai-go-sdk"
 	"github.com/joho/godotenv"
 )
 
-const srtChunkMS = 10_000
+const (
+	srtChunkMS    = 10_000
+	assemblyAIURL = "https://api.assemblyai.com/v2"
+	pollInterval  = 5 * time.Second
+)
 
 func logMsg(emoji, msg string) {
 	fmt.Printf("[%s] %s  %s\n", time.Now().Format("15:04:05"), emoji, msg)
-}
-
-func derefStr(s *string) string {
-	if s == nil {
-		return ""
-	}
-	return *s
 }
 
 func sanitizeFilename(name string) string {
@@ -38,7 +36,7 @@ func sanitizeFilename(name string) string {
 	return name
 }
 
-// wordData and transcriptCache mirror the JSON cache format from the Python version.
+// wordData and transcriptCache mirror the JSON cache format.
 type wordData struct {
 	Text       string  `json:"text"`
 	Start      int64   `json:"start"`
@@ -98,62 +96,165 @@ func downloadAudio(url, outputDir string) (audioPath, title string, err error) {
 	return audioPath, title, nil
 }
 
-// Stage 2: Transcription
+// Stage 2: Transcription via AssemblyAI REST API
+
+func apiRequest(method, path, apiKey string, body io.Reader, contentType string, out any) error {
+	req, err := http.NewRequest(method, assemblyAIURL+path, body)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", apiKey)
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+type progressReader struct {
+	r     io.Reader
+	total int64
+	read  int64
+}
+
+func (p *progressReader) Read(buf []byte) (int, error) {
+	n, err := p.r.Read(buf)
+	p.read += int64(n)
+	pct := float64(p.read) / float64(p.total) * 100
+	mb := float64(p.read) / (1024 * 1024)
+	totalMB := float64(p.total) / (1024 * 1024)
+	fmt.Printf("\r[%s] ☁️   Upload: %.0f%% (%.0f / %.0f MB)   ",
+		time.Now().Format("15:04:05"), pct, mb, totalMB)
+	return n, err
+}
+
+func uploadAudio(apiKey, audioPath string) (string, error) {
+	f, err := os.Open(audioPath)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return "", err
+	}
+
+	pr := &progressReader{r: f, total: info.Size()}
+	req, err := http.NewRequest("POST", assemblyAIURL+"/upload", pr)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", apiKey)
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req.ContentLength = info.Size()
+
+	resp, err := http.DefaultClient.Do(req)
+	fmt.Println() // quebra a linha do progresso
+	if err != nil {
+		return "", fmt.Errorf("erro no upload: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		b, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("erro no upload: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+
+	var result struct {
+		UploadURL string `json:"upload_url"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("erro no upload: %w", err)
+	}
+	return result.UploadURL, nil
+}
+
+func submitTranscript(apiKey, audioURL string, translate bool) (string, error) {
+	body := map[string]any{
+		"audio_url":     audioURL,
+		"speech_models": []string{"universal-2"},
+		"punctuate":     true,
+		"format_text":   true,
+	}
+	if translate {
+		body["language_detection"] = true
+	} else {
+		body["language_code"] = "en"
+	}
+
+	data, _ := json.Marshal(body)
+	var result struct {
+		ID string `json:"id"`
+	}
+	if err := apiRequest("POST", "/transcript", apiKey, bytes.NewReader(data), "application/json", &result); err != nil {
+		return "", fmt.Errorf("erro ao submeter transcrição: %w", err)
+	}
+	return result.ID, nil
+}
+
+func pollTranscript(apiKey, id string) (*transcriptCache, error) {
+	for {
+		var result struct {
+			ID     string     `json:"id"`
+			Status string     `json:"status"`
+			Text   string     `json:"text"`
+			Error  string     `json:"error"`
+			Words  []wordData `json:"words"`
+		}
+		if err := apiRequest("GET", "/transcript/"+id, apiKey, nil, "", &result); err != nil {
+			return nil, err
+		}
+		switch result.Status {
+		case "completed":
+			return &transcriptCache{
+				ID:     result.ID,
+				Status: result.Status,
+				Text:   result.Text,
+				Words:  result.Words,
+			}, nil
+		case "error":
+			return nil, fmt.Errorf("transcrição falhou: %s", result.Error)
+		}
+		time.Sleep(pollInterval)
+	}
+}
 
 func transcribeAudio(audioPath string, translate bool) (*transcriptCache, error) {
-	client := aai.NewClient(os.Getenv("ASSEMBLYAI_API_KEY"))
+	apiKey := os.Getenv("ASSEMBLYAI_API_KEY")
 
 	logMsg("☁️", "Enviando áudio para AssemblyAI: "+filepath.Base(audioPath))
 	logMsg("⏳", "Upload pode levar alguns minutos para arquivos grandes...")
 
-	// SpeechModel omitted: the API defaults to "best" when not set.
-	// The Go SDK v1.10.0 uses the deprecated speech_model field; omitting
-	// it avoids the deprecation error while keeping the same behavior.
-	params := &aai.TranscriptOptionalParams{
-		Punctuate:  aai.Bool(true),
-		FormatText: aai.Bool(true),
-	}
-
-	if translate {
-		params.LanguageDetection = aai.Bool(true)
-	} else {
-		params.LanguageCode = aai.TranscriptLanguageCode("en")
-	}
-
-	f, err := os.Open(audioPath)
+	uploadURL, err := uploadAudio(apiKey, audioPath)
 	if err != nil {
-		return nil, fmt.Errorf("erro ao abrir áudio: %w", err)
+		return nil, err
 	}
-	defer f.Close()
 
 	logMsg("🎙️", "Iniciando transcrição...")
 	logMsg("⏱️", "Estimativa para 4h de áudio: 15–25 minutos")
 
-	t, err := client.Transcripts.TranscribeFromReader(context.Background(), f, params)
+	id, err := submitTranscript(apiKey, uploadURL, translate)
 	if err != nil {
-		return nil, fmt.Errorf("erro na transcrição: %w", err)
+		return nil, err
+	}
+
+	ct, err := pollTranscript(apiKey, id)
+	if err != nil {
+		return nil, err
 	}
 
 	logMsg("✅", "Transcrição concluída!")
-
-	ct := &transcriptCache{
-		ID:     derefStr(t.ID),
-		Status: string(t.Status),
-		Text:   derefStr(t.Text),
-	}
-	for _, w := range t.Words {
-		wd := wordData{Text: derefStr(w.Text)}
-		if w.Start != nil {
-			wd.Start = *w.Start
-		}
-		if w.End != nil {
-			wd.End = *w.End
-		}
-		if w.Confidence != nil {
-			wd.Confidence = *w.Confidence
-		}
-		ct.Words = append(ct.Words, wd)
-	}
 	return ct, nil
 }
 
@@ -253,7 +354,7 @@ func main() {
 	flag.Parse()
 
 	if flag.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "Uso: yt-transcriber <URL> [--translate] [--output-dir DIR] [--skip-download FILE]")
+		fmt.Fprintln(os.Stderr, "Uso: yt-transcriber <URL> [--translate] [--output-dir DIR] [--skip-download FILE] [--audio-only]")
 		os.Exit(1)
 	}
 	videoURL := flag.Arg(0)
@@ -282,11 +383,12 @@ func main() {
 	fmt.Println()
 
 	// Stage 1: Audio
-	var audioPath, title string
 	if *audioOnly && *skipDownload != "" {
 		fmt.Fprintln(os.Stderr, "[ERRO] --audio-only e --skip-download não podem ser usados juntos.")
 		os.Exit(1)
 	}
+
+	var audioPath, title string
 	if *skipDownload != "" {
 		audioPath = *skipDownload
 		title = strings.TrimSuffix(filepath.Base(audioPath), filepath.Ext(audioPath))
