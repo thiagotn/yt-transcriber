@@ -106,18 +106,16 @@ func transcribeAudio(audioPath string, translate bool) (*transcriptCache, error)
 	logMsg("☁️", "Enviando áudio para AssemblyAI: "+filepath.Base(audioPath))
 	logMsg("⏳", "Upload pode levar alguns minutos para arquivos grandes...")
 
-	speechModel := aai.SpeechModelBest
 	params := &aai.TranscriptOptionalParams{
 		Punctuate:   aai.Bool(true),
 		FormatText:  aai.Bool(true),
-		SpeechModel: &speechModel,
+		SpeechModel: aai.SpeechModelBest,
 	}
 
 	if translate {
 		params.LanguageDetection = aai.Bool(true)
 	} else {
-		lang := aai.TranscriptLanguageCode("en")
-		params.LanguageCode = &lang
+		params.LanguageCode = aai.TranscriptLanguageCode("en")
 	}
 
 	f, err := os.Open(audioPath)
