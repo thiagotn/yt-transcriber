@@ -249,6 +249,7 @@ func main() {
 	translateFlag := flag.Bool("translate", false, "Ativa detecção de idioma automática (para vídeos não-inglês)")
 	outputDir := flag.String("output-dir", "./output", "Pasta de saída (padrão: ./output)")
 	skipDownload := flag.String("skip-download", "", "Pula o download e usa um MP3 já existente")
+	audioOnly := flag.Bool("audio-only", false, "Apenas baixa o MP3, sem transcrever")
 	flag.Parse()
 
 	if flag.NArg() < 1 {
@@ -259,7 +260,7 @@ func main() {
 
 	_ = godotenv.Load()
 
-	if os.Getenv("ASSEMBLYAI_API_KEY") == "" {
+	if !*audioOnly && os.Getenv("ASSEMBLYAI_API_KEY") == "" {
 		fmt.Fprintln(os.Stderr, "[ERRO] ASSEMBLYAI_API_KEY não encontrada. Crie um .env ou exporte a variável.")
 		os.Exit(1)
 	}
@@ -282,6 +283,10 @@ func main() {
 
 	// Stage 1: Audio
 	var audioPath, title string
+	if *audioOnly && *skipDownload != "" {
+		fmt.Fprintln(os.Stderr, "[ERRO] --audio-only e --skip-download não podem ser usados juntos.")
+		os.Exit(1)
+	}
 	if *skipDownload != "" {
 		audioPath = *skipDownload
 		title = strings.TrimSuffix(filepath.Base(audioPath), filepath.Ext(audioPath))
@@ -297,6 +302,12 @@ func main() {
 			fmt.Fprintf(os.Stderr, "[ERRO] %v\n", err)
 			os.Exit(1)
 		}
+	}
+
+	if *audioOnly {
+		fmt.Println()
+		logMsg("✅", fmt.Sprintf("Áudio disponível em: %s", audioPath))
+		return
 	}
 
 	safeTitle := sanitizeFilename(title)

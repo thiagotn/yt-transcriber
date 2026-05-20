@@ -7,7 +7,8 @@ e exporta em `.txt`, `.srt` e `.json`.
 
 ## 1. Pré-requisitos
 
-- Python 3.9+
+- [Go 1.21+](https://go.dev/dl/)
+- `yt-dlp`: `pip install yt-dlp`
 - Conta gratuita na AssemblyAI: https://www.assemblyai.com
   - Tem ~5h de crédito gratuito no cadastro
 
@@ -16,8 +17,13 @@ e exporta em `.txt`, `.srt` e `.json`.
 ## 2. Instalação
 
 ```bash
-# Instalar dependências Python
-pip install yt-dlp assemblyai python-dotenv
+# Clonar e baixar dependências
+git clone https://github.com/thiagotn/yt-transcriber.git
+cd yt-transcriber
+go mod tidy
+
+# Compilar (opcional)
+go build -o yt-transcriber .
 ```
 
 ---
@@ -25,9 +31,7 @@ pip install yt-dlp assemblyai python-dotenv
 ## 3. Configuração
 
 ```bash
-# Copie o arquivo de exemplo
 cp .env.example .env
-
 # Edite e coloque sua chave da AssemblyAI
 # (Dashboard → API Keys em assemblyai.com)
 nano .env
@@ -39,16 +43,22 @@ nano .env
 
 ```bash
 # Uso básico
-python transcribe_youtube.py "https://www.youtube.com/watch?v=XXXXX"
+go run main.go "https://www.youtube.com/watch?v=XXXXX"
+
+# Apenas baixar o MP3 (sem transcrever)
+go run main.go "https://www.youtube.com/watch?v=XXXXX" --audio-only
 
 # Com detecção de idioma automática (vídeos não-inglês)
-python transcribe_youtube.py "https://www.youtube.com/watch?v=XXXXX" --translate
+go run main.go "https://www.youtube.com/watch?v=XXXXX" --translate
 
 # Pular o download (usar MP3 já baixado)
-python transcribe_youtube.py "https://..." --skip-download ./output/meu_video.mp3
+go run main.go "https://..." --skip-download ./output/meu_video.mp3
 
 # Pasta de saída customizada
-python transcribe_youtube.py "https://..." --output-dir ~/Downloads/transcricoes
+go run main.go "https://..." --output-dir ~/Downloads/transcricoes
+
+# Usando o binário compilado
+./yt-transcriber "https://www.youtube.com/watch?v=XXXXX"
 ```
 
 ---
@@ -70,7 +80,7 @@ Tudo vai para a pasta `./output/`:
 
 Se o script foi interrompido após a transcrição, o cache `.json` evita
 cobranças desnecessárias. Basta rodar novamente — ele detecta o cache
-e apenas re-exporta os arquivos.
+e re-exporta os arquivos `.txt` e `.srt` automaticamente.
 
 Para forçar uma nova transcrição, delete o `.json`:
 ```bash
