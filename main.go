@@ -106,10 +106,12 @@ func transcribeAudio(audioPath string, translate bool) (*transcriptCache, error)
 	logMsg("☁️", "Enviando áudio para AssemblyAI: "+filepath.Base(audioPath))
 	logMsg("⏳", "Upload pode levar alguns minutos para arquivos grandes...")
 
+	// SpeechModel omitted: the API defaults to "best" when not set.
+	// The Go SDK v1.10.0 uses the deprecated speech_model field; omitting
+	// it avoids the deprecation error while keeping the same behavior.
 	params := &aai.TranscriptOptionalParams{
-		Punctuate:   aai.Bool(true),
-		FormatText:  aai.Bool(true),
-		SpeechModel: aai.SpeechModelBest,
+		Punctuate:  aai.Bool(true),
+		FormatText: aai.Bool(true),
 	}
 
 	if translate {
