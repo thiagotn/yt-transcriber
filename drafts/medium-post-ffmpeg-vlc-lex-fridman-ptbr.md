@@ -1,4 +1,4 @@
-# O Software Invisível que Roda o Vídeo da Internet
+# FFmpeg e VLC: O Software que Ninguém Conhece e Todo Mundo Usa
 
 *Um resumo do Lex Fridman Podcast #496 com Jean-Baptiste Kempf e Kieran Cunha*
 
